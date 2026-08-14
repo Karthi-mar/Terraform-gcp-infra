@@ -1,0 +1,33 @@
+name: terraform CI
+
+on:
+    push:
+        branches: [main]
+        path: ["**.tf"]
+    pull_request:
+        branches: [main]
+        path: ["**.tf"]
+
+jobs:
+    fmt:
+        run-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: hashicorp/setup-terraform@v3
+            - run: terraform fmt -check -recursive 
+        
+    validate:
+        run-on: ubuntu-latest
+        needs: fmt
+        strategy:
+            matrix:
+                environment: [dev,prod]
+        steps:
+            - uses: actions/checkout@v4
+            - uses: hashicorp/setup-terraform@v3
+            - name: Init without the backend
+            - run: terrafrom init -backend=false
+              working-directory: environments/${{matrix.environment }}
+            - name: validate
+            - run: terraform validate
+              working-directory: environments/${{matrix.environment }}
