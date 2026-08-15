@@ -1,0 +1,213 @@
+=====================================================================
+ CI PIPELINE + REPO HOUSEKEEPING - explained simply
+=====================================================================
+
+WHAT IS A CI PIPELINE, AND WHAT DOES THIS ONE DO?
+---------------------------------------------------------------------
+CI = Continuous Integration. It's an automated robot that runs checks
+on your code every time you push it, so mistakes get caught
+immediately instead of sitting unnoticed. GitHub Actions is GitHub's
+built-in CI system - it reads .github/workflows/*.yml files and runs
+them on GitHub's own servers (not your machine), triggered by things
+like a push or a pull request.
+
+This project's pipeline (.github/workflows/ci.yml) runs two jobs
+whenever a .tf file changes on a push/PR to main:
+
+  1. fmt job: runs "terraform fmt -check -recursive" - checks every
+     .tf file is in Terraform's standard style (indentation, spacing,
+     aligned "="). It does NOT fix anything, just fails if the style
+     is off.
+
+  2. validate job (runs after fmt succeeds, via "needs: fmt"): for
+     each environment in the matrix (currently just "dev"), runs
+     "terraform init -backend=false" then "terraform validate" -
+     the same syntax/reference check we've been doing locally this
+     whole session.
+
+IMPORTANT: this pipeline never runs plan or apply. It cannot create,
+modify, or destroy any real GCP resource, and needs no GCP
+credentials at all. It's a pure safety net - free to run, zero risk
+to billing. That was a deliberate, good design choice already baked
+into the original (buggy) file.
+
+
+BUGS WE FOUND AND FIXED IN ci.yml
+---------------------------------------------------------------------
+1. Lines 6, 9: "path:" -> "paths:"
+   GitHub Actions' trigger-filter key is plural. Singular isn't
+   recognized, so the trigger config itself was invalid.
+
+2. Lines 13, 20: "run-on:" -> "runs-on:"
+   Required key telling GitHub which machine image to run the job
+   on. Misspelled, so not recognized at all.
+
+3. Lines 28-32 (structural): each "- name:" / "- run:" pair was
+   written as two SEPARATE list items instead of two keys on the
+   SAME step. Every "-" starts a new step in YAML; a step needs a
+   "run" or "uses" key to do anything, so "- name: ..." alone (no
+   run) is invalid, and the following "- run: ..." became an
+   anonymous, unrelated step. Fix: only one "-" per step, with name/
+   run/working-directory all indented together underneath it.
+
+4. Line 29: "terrafrom init" -> "terraform init" (plain typo, would
+   fail with "command not found" even once the YAML was valid).
+
+5. Line 24 (scope decision, not a bug): matrix was [dev,prod]. Since
+   environments/prod still has unfixed bugs (deliberately deferred -
+   see notes/05-environments-dev.txt), we scoped this down to [dev]
+   for now, with a comment to add prod back once it's fixed. Running
+   validate against known-broken code would just make CI permanently
+   red for no useful reason right now.
+
+
+THE ERROR WE ACTUALLY HIT AFTER PUSHING: terraform fmt -check FAILURE
+---------------------------------------------------------------------
+After pushing the syntax fixes above, GitHub Actions still failed -
+this time in a different way:
+
+    Error: Terraform exited with code 3.
+    Error: Process completed with exit code 1.
+
+WHAT THIS MEANT: exit code 3 from "terraform fmt -check" specifically
+means "some files aren't in canonical Terraform style" - it is NOT a
+syntax error, NOT a logic bug, and NOT related to GCP at all. Across
+several rounds of manual hand-edits (fixing typos, adding "=" signs,
+renaming things), the whitespace/indentation in various files drifted
+from Terraform's expected style - e.g. "resource "x" "y"{" with no
+space before "{", or "=" signs not lined up in a block. The fmt job
+runs BEFORE validate ("needs: fmt" on the validate job), and since it
+failed, validate was skipped entirely (shown as "skipped", not
+"failed", in the GitHub Actions UI/API).
+
+HOW WE DIAGNOSED IT: rather than guess, we pulled the actual run
+details from GitHub's public API (no local GitHub CLI was installed):
+    curl https://api.github.com/repos/<owner>/<repo>/actions/runs
+    curl https://api.github.com/repos/<owner>/<repo>/actions/runs/<run_id>/jobs
+This showed exactly which STEP failed ("Run terraform fmt -check
+-recursive") and that validate's conclusion was "skipped", confirming
+the dependency chain reasoning above without needing to open a
+browser.
+
+THE FIX: terraform fmt (without -check) doesn't just complain, it
+actively REWRITES files to the correct style in place. Running it
+recursively from the repo root fixed all 17 already-committed .tf
+files at once - purely whitespace changes, zero behavior differences
+(confirmed by re-running "terraform validate" in environments/dev
+afterward - still valid).
+
+    terraform fmt -recursive -diff     # shows what would change AND applies it
+    terraform fmt -check -recursive    # matches exactly what CI runs;
+                                        # exit code 0 = would now pass
+
+LESSON: "terraform validate" and "terraform fmt -check" check two
+completely different things - valid syntax/references vs. consistent
+style. A file can be perfectly valid Terraform and still fail a fmt
+check, and vice versa is not really possible (fmt requires valid HCL
+to even parse). Get in the habit of running "terraform fmt -recursive"
+locally before committing, so CI's fmt job basically never fails.
+
+
+REPO HOUSEKEEPING: .gitignore, .gitattributes, and .tfvars.example
+---------------------------------------------------------------------
+Before pushing any of this work, "git add ." accidentally staged a
+bunch of things that should never be committed:
+  - environments/dev/.terraform/ and bootstrap/.terraform/ - contain
+    the actual downloaded provider PLUGIN BINARY (tens of MB), fully
+    regenerated by "terraform init" any time it's needed. Never
+    belongs in git.
+  - bootstrap/terraform.tfstate - bootstrap has no remote backend (see
+    notes/01-bootstrap.txt), so its real state lives in a local file.
+    State files can contain sensitive data as a project grows and
+    should never be committed - state that matters belongs in the
+    remote GCS backend, not git history.
+
+.gitignore was added to exclude these automatically going forward:
+    **/.terraform/
+    *.tfstate
+    *.tfstate.*
+    *.tfvars
+    CLAUDE.md
+
+Note on *.tfvars: environments/dev/terraform.tfvars and friends hold
+REAL values - your actual GCP project ID and your home IP address.
+Since this repo is public on GitHub, we chose to keep these local-only
+rather than publish them. Since these files were ALREADY tracked in
+git from the original commits, adding a pattern to .gitignore alone
+doesn't stop tracking a file that's already tracked - we had to
+explicitly untrack them first:
+    git rm --cached bootstrap/terraform.tfvars environments/dev/terraform.tfvars environments/prod/terraform.tfvars
+This removes them from git's index (future changes won't be tracked)
+while leaving the actual file sitting on your disk untouched.
+
+To keep the repo self-documenting despite that, we added committed
+*.tfvars.example files (bootstrap/, environments/dev/,
+environments/prod/) showing the placeholder shape of each file
+without real values - so anyone (including future-you on a fresh
+clone) knows what to fill in.
+
+One exception worth noting: .terraform.lock.hcl is INTENTIONALLY
+NOT gitignored, unlike the .terraform/ folder it lives next to. This
+small file just records the exact provider version that was
+resolved (e.g. hashicorp/google v5.45.2) - committing it means
+everyone who runs "terraform init" gets the identical version,
+avoiding "works on my machine" version drift. This is standard
+Terraform practice.
+
+
+THE .gitattributes FIX: PREVENTING THE CRLF BUG FROM EVER RECURRING
+---------------------------------------------------------------------
+While staging files, git printed this warning:
+    warning: in the working copy of 'modules/compute/startup_script.sh',
+    LF will be replaced by CRLF the next time Git touches it
+
+This mattered a lot given the CRLF bug from notes/05-environments-dev.txt
+(a script with Windows line endings broke on the GCP Linux VM). This
+warning meant the local git config auto-converts line endings on
+checkout (a common Windows default) - meaning if this repo were ever
+cloned fresh onto a Windows machine (including this same one, later),
+the exact same bug could silently come back, even though the file on
+disk is fixed right now.
+
+Fix: a .gitattributes file that forces the correct line ending for
+shell scripts, overriding whatever any individual machine's git
+config says:
+    *.sh text eol=lf
+This is a repo-level rule that travels with the code itself, so it
+protects every future clone/contributor regardless of their local
+git settings.
+
+
+COMMANDS/WORKFLOW USED FOR THIS WHOLE PASS
+---------------------------------------------------------------------
+git status                          # see what changed
+git reset                           # unstage a bad "git add ." (safe,
+                                     # doesn't touch working tree files)
+git rm --cached <tfvars files>      # untrack without deleting
+git add <specific intended files>   # stage only what should be committed
+git status                          # review before committing
+git commit -F <message file>        # commit (used a file instead of
+                                     # inline -m due to a heredoc/shell
+                                     # quoting issue on this system)
+git push origin main
+terraform fmt -recursive -diff      # after CI failed on fmt, fix + preview
+terraform fmt -check -recursive     # confirm it now matches CI's check
+git add -u                          # stage only already-tracked files
+                                     # that fmt modified
+git commit -m "..."
+git push origin main
+
+
+RESULT
+---------------------------------------------------------------------
+CI is green: https://github.com/Karthi-mar/Terraform-gcp-infra/actions
+Both the fmt and validate jobs pass on push to main.
+
+
+WHAT'S NEXT
+---------------------------------------------------------------------
+environments/prod - the last remaining piece. Needs the same bug
+fixes dev got (module/compute path, "${var.env}" interpolation) plus
+a backend.tf and outputs.tf written from scratch (prod currently has
+neither). Once prod validates and applies cleanly, flip the CI
+matrix back to [dev, prod].
