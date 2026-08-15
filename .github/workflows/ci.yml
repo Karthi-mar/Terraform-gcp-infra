@@ -21,7 +21,7 @@ jobs:
         needs: fmt
         strategy:
             matrix:
-                environment: [dev]   #add prod later to the list
+                environment: [dev,prod]   #add prod later to the list
         steps:
             - uses: actions/checkout@v4
             - uses: hashicorp/setup-terraform@v3

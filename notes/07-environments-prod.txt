@@ -1,0 +1,149 @@
+=====================================================================
+ ENVIRONMENTS/PROD - explained simply
+=====================================================================
+
+WHAT IS THIS FOLDER FOR?
+---------------------------------------------------------------------
+The same idea as environments/dev (see notes/05-environments-dev.txt
+for the full concepts - module composition, resource dependency
+ordering, etc.) - a second, independent copy of the same
+network+firewall+compute stack, meant to represent a "production"
+environment separate from "development". Same modules, same
+structure, different variable values (env = "prod" instead of "dev").
+
+Unlike dev, prod was left completely untouched during the earlier
+part of this session - it still had the ORIGINAL bugs, plus it was
+missing two files entirely (backend.tf and outputs.tf never existed
+for prod). This was a deliberate scope decision: GCP's Always Free
+tier only covers ONE e2-micro instance per billing account per month,
+so we didn't want dev and prod both running at the same time by
+accident while we were still learning/testing.
+
+
+WHAT WAS DIFFERENT ABOUT FIXING THIS FOLDER VS DEV
+---------------------------------------------------------------------
+Most of this was a repeat of environments/dev's fixes (same bugs,
+literally copy-pasted mistakes since prod/main.tf was a duplicate of
+dev/main.tf from before dev got fixed):
+  - main.tf: "../../module/compute" -> "../../modules/compute"
+  - main.tf: "$var.env}-web-server" -> "${var.env}-web-server"
+  - Added ssh_source_range variable + wired it into the firewall
+    module call, same pattern as dev (restricts SSH to your IP
+    instead of the module's 0.0.0.0/0 default)
+
+But two files had to be WRITTEN FROM SCRATCH, since they never
+existed for prod at all:
+
+backend.tf (new file)
+    terraform {
+        backend "gcs" {
+            bucket = "gcp-webserver-505607-tfstate"
+            prefix = "prod"
+        }
+    }
+  Points at the EXACT SAME bucket dev uses (the one bootstrap
+  created) - GCS buckets are exactly like a shared drive, multiple
+  independent "folders" (prefixes) can live inside one bucket safely.
+  The only thing that matters is that prefix = "prod" here is
+  DIFFERENT from dev's prefix = "dev". If these matched, both
+  environments would try to read/write the exact same state file and
+  corrupt/overwrite each other's tracked resources - only the prefix
+  keeps their state cleanly separated inside one shared bucket.
+
+outputs.tf (new file)
+    output "web_server_ip" {
+        description = "External IP of the deployed web server"
+        value       = module.compute.external_ip
+    }
+  Identical in shape to dev's - hands back the VM's public IP after
+  apply.
+
+
+THE KEY CONCEPT WE LEARNED HERE: SHARED BUCKET, SEPARATE STATE FILES
+---------------------------------------------------------------------
+After applying both dev and destroying both, listing the bucket's
+contents showed:
+    gs://gcp-webserver-505607-tfstate/dev/default.tfstate
+    gs://gcp-webserver-505607-tfstate/prod/default.tfstate
+Two completely independent state files, living peacefully inside the
+one bucket bootstrap created, thanks to each environment's backend.tf
+using a different "prefix" value. This is the standard, recommended
+pattern for handling multiple environments in Terraform - one shared
+state bucket, one prefix per environment - rather than needing a
+brand new bucket for every environment you ever create.
+
+We also saw "Acquiring state lock" / "Releasing state lock" messages
+during plan/apply for the first time here (same mechanism applies to
+dev, just wasn't highlighted before) - the GCS backend briefly locks
+the specific state file it's working with, so two terraform commands
+can never run against the same environment's state at the same time
+and corrupt it.
+
+
+BUGS WE FOUND AND FIXED HERE
+---------------------------------------------------------------------
+1. main.tf: source = "../../module/compute" -> "../../modules/compute"
+2. main.tf: instance_name = "$var.env}-web-server" -> "${var.env}-web-server"
+3. Added: variable "ssh_source_range" (declared in main.tf itself
+   this time rather than variables.tf - functionally fine, Terraform
+   loads every *.tf file in a directory the same way regardless of
+   which one a block lives in, but worth eventually moving to
+   variables.tf for consistency with the rest of the project)
+4. Added: ssh_source_range = var.ssh_source_range in the firewall
+   module call
+5. Created backend.tf from scratch (did not exist)
+6. Created outputs.tf from scratch (did not exist)
+7. terraform.tfvars: filled in real project_id (stripped leading
+   space), region (stripped leading space), and added
+   ssh_source_range = ["49.47.219.213/32"]
+
+
+COMMANDS WE RAN FOR THIS FOLDER
+---------------------------------------------------------------------
+cd environments/prod
+terraform init       -> connected to the SAME GCS bucket as dev, but
+                         with prefix "prod" - separate state achieved
+terraform validate   -> "Success! The configuration is valid."
+terraform plan       -> 5 to add: vpc, subnet, 2 firewall rules, vm
+                         (all named prod-* instead of dev-*)
+terraform apply      -> typed "yes", created all 5 resources -
+                         nginx worked on the FIRST try this time
+                         (the CRLF fix + .gitattributes protection
+                         from the dev pass carried over automatically,
+                         since both environments share the exact same
+                         modules/compute/startup_script.sh file)
+terraform destroy    -> typed "yes", removed all 5 resources again
+
+Read-only verification used (safe, don't change anything):
+  gcloud compute instances list --project=gcp-webserver-505607
+  curl http://<external_ip>/                -> HTTP 200, real nginx page
+  gcloud storage ls -r gs://gcp-webserver-505607-tfstate/**
+                                             -> confirmed dev/ and prod/
+                                                state files coexist
+
+
+RESULT
+---------------------------------------------------------------------
+prod applied successfully (web_server_ip = 34.63.246.91, verified
+HTTP 200 + real nginx welcome page), then destroyed cleanly. Verified
+via gcloud that 0 instances remain and prod-vpc is gone. This closes
+out every environment in the original project - both dev and prod now
+fully work, entirely within GCP's Always Free tier, and nothing is
+left running/billing.
+
+
+WHAT'S NEXT
+---------------------------------------------------------------------
+This was the last piece of the original debugging plan. Everything
+left is optional follow-up:
+  - Commit + push these prod fixes (same git workflow as
+    notes/06-ci-and-housekeeping.txt: review git status, stage,
+    commit, push)
+  - Flip .github/workflows/ci.yml's validate matrix back to
+    [dev, prod] now that prod's code is fixed too, then push and
+    confirm CI stays green with both
+  - Optional cleanup: move prod's ssh_source_range variable block
+    from main.tf into variables.tf for consistency
+  - If you ever want to actually leave one environment running
+    long-term (not just testing), remember only ONE e2-micro is free
+    at a time - never apply both dev and prod simultaneously
