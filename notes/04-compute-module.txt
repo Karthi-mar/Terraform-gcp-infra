@@ -1,0 +1,133 @@
+=====================================================================
+ MODULES/COMPUTE - explained simply
+=====================================================================
+
+WHAT IS THIS FOLDER FOR?
+---------------------------------------------------------------------
+This is the recipe for the actual computer (VM = Virtual Machine)
+that lives inside the subnet, gets a public IP so people can reach
+it, and automatically installs + starts a web server (nginx) the
+moment it boots up for the first time.
+
+Think of everything built so far as preparing an empty plot of land
+with a fence (VPC) and gates (firewall rules). This module is where
+you finally put a building (the VM) on that land.
+
+
+FILES IN THIS FOLDER
+---------------------------------------------------------------------
+
+main.tf
+  Declares one resource: google_compute_instance "vm"
+    - name / machine_type / zone / tags -> straightforward, filled
+      from variables
+    - boot_disk { initialize_params { image, type, size } }
+        -> the "hard drive" the VM boots from. image =
+           "debian-cloud/debian-12" means "start from a clean,
+           official Debian Linux 12 image". type = "pd-standard" is
+           the cheapest disk type. size = 10 means 10 GB - plenty for
+           a small nginx site and comfortably inside GCP's Always
+           Free 30 GB-month disk allowance.
+    - network_interface { subnetwork = var.subnet_id
+                           access_config {} }
+        -> plugs the VM into the subnet the network module built.
+           access_config {} (even though it's empty) is what tells
+           GCP "give this VM a public, internet-reachable IP
+           address". If you deleted access_config{} entirely, the VM
+           would ONLY be reachable from inside the VPC (no public
+           IP at all) - useful for private backend servers, not for
+           what we want here (a public website).
+    - metadata_startup_script = file("${path.module}/startup_script.sh")
+        -> This is the powerful part: GCP lets you hand a VM a shell
+           script that runs automatically ONE TIME, the very first
+           time it boots. file(...) just reads the text content of
+           startup_script.sh from disk and hands it to GCP as a
+           string. Google Compute Engine's guest agent (already
+           built into the debian-cloud image) is what actually reads
+           this metadata field and executes it as root on first boot.
+
+variable.tf   (singular filename - Terraform doesn't care, it loads
+               every *.tf file in a folder regardless of name, but
+               the other modules used "variables.tf" - a small
+               inconsistency, harmless)
+  instance_name  - required, no default
+  machine_type   - defaults to "e2-micro" (the ONE machine type
+                   GCP's Always Free tier covers - one instance,
+                   per billing account, per month, for free)
+  zone           - defaults to "us-central1-a" (inside a free-tier
+                   eligible region: us-west1 / us-central1 / us-east1)
+  image          - defaults to "debian-cloud/debian-12"
+  subnet_id      - required, comes from module.network.subnet_id
+  network_tags   - required, list of strings - MUST contain the same
+                   tag string ("web-server") that modules/firewall's
+                   target_tags uses, or the firewall rules silently
+                   won't apply to this VM (see the firewall module's
+                   notes for why)
+
+outputs.tf
+  instance_name - hands back the VM's actual name
+  external_ip   - hands back the VM's public IP address, so once
+                  applied you can immediately open it in a browser.
+                  Note the path to get there:
+                  google_compute_instance.vm.network_interface[0].access_config[0].nat_ip
+                  Terraform models network_interface and
+                  access_config as LISTS (because a VM could
+                  technically have several), so even with just one,
+                  you have to say [0] to grab "the first (only) one".
+                  nat_ip is the actual public IP address value inside
+                  that access_config block.
+
+startup_script.sh
+  A tiny bash script:
+    apt-get update              -> refresh the list of available
+                                    software packages
+    apt-get install -y nginx    -> install the nginx web server,
+                                    -y auto-confirms so it doesn't
+                                    hang waiting for a keypress
+                                    (important since nothing is
+                                    watching the screen on first boot)
+    systemctl enable nginx      -> make nginx start automatically on
+                                    every future reboot too, not just
+                                    right now
+    systemctl start nginx       -> start it immediately this time
+  Once this finishes, visiting http://<external_ip> in a browser
+  should show the default "Welcome to nginx!" page.
+
+
+BUGS WE FOUND AND FIXED HERE
+---------------------------------------------------------------------
+1. main.tf line 20: metadata_Startup_script -> metadata_startup_script
+   (wrong casing - GCP's real argument name is all lowercase; as
+   written Terraform didn't recognize it as a valid argument at all)
+
+2. main.tf line 20: file("${path.module}/startup-script.sh")
+                     -> file("${path.module}/startup_script.sh")
+   (hyphen vs underscore mismatch - the actual file on disk uses an
+   underscore, so the old code was pointing at a file that doesn't
+   exist)
+
+3. variable.tf line 31: description " Network tags..."
+                         -> description = " Network tags..."
+   (missing "=" - same class of bug seen in the firewall module)
+
+
+COMMANDS WE RAN FOR THIS FOLDER
+---------------------------------------------------------------------
+cd modules/compute
+terraform init       -> downloaded Google provider, success
+terraform validate   -> "Success! The configuration is valid."
+
+Then deleted the .terraform/ and .terraform.lock.hcl this created,
+same reasoning as the other two modules.
+
+No plan/apply here either - this module also has no provider/backend
+of its own; it only gets exercised for real once environments/dev
+calls it.
+
+
+WHAT'S NEXT
+---------------------------------------------------------------------
+All three modules (network, firewall, compute) now validate cleanly
+on their own. Next is environments/dev - the "root" configuration
+that actually WIRES these three modules together with real values and
+is the thing we'll finally run terraform apply on for real.

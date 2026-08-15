@@ -1,0 +1,11 @@
+project_id = "your-gcp-project-id"
+region     = "us-central1"
+zone       = "us-central1-a"
+env        = "prod"
+
+# Copy this file to terraform.tfvars (which is gitignored) and fill in
+# your real values.
+# NOTE: prod is not yet fixed (see CLAUDE.md) - this example reflects the
+# variables as they exist today and will need updating once prod gets the
+# same fixes dev received (e.g. an ssh_source_range variable will likely
+# be added here too).

@@ -1,0 +1,6 @@
+project_id  = "your-gcp-project-id"
+bucket_name = "your-gcp-project-id-tfstate"
+region      = "us-central1"
+
+# Copy this file to terraform.tfvars (which is gitignored) and fill in
+# your real values. bucket_name must be globally unique across all of GCP.

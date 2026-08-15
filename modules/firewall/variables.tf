@@ -13,7 +13,7 @@ variable "target_tags" {
     type = list(string) 
 }
 
-variable "shh_source_range" {
+variable "ssh_source_range" {
     description = "CIDR range allowed to ssh in"
     type = list(string)
     default = ["0.0.0.0/0"] 

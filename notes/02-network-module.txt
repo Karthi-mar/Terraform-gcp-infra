@@ -1,0 +1,128 @@
+=====================================================================
+ MODULES/NETWORK - explained simply
+=====================================================================
+
+WHAT IS THIS FOLDER FOR?
+---------------------------------------------------------------------
+A "module" in Terraform is just a reusable recipe. Instead of writing
+"create a VPC and a subnet" separately inside dev AND prod, you write
+that recipe ONCE here, and both dev and prod just say "use this
+recipe, with these ingredients (variables)". This module's recipe:
+create a private network (VPC) and one subnet inside it.
+
+Think of a VPC (Virtual Private Cloud) as your own private, invisible
+fence around a patch of land in Google's data center. Nothing from
+outside can get in or out unless you explicitly cut a gate (that's
+what the firewall module does later). A subnet is a smaller, named
+section of land inside that fence, tied to one region, where you
+actually place things (like your VM).
+
+NOTE: modules are never applied by themselves. They're only "recipes"
+- they get used for real when environments/dev/main.tf calls them
+with module "network" { source = "../../modules/network" ... }.
+
+
+FILES IN THIS FOLDER
+---------------------------------------------------------------------
+
+main.tf
+  Declares two real GCP resources:
+    1. google_compute_network "vpc"
+         - name = var.vpc_name
+         - auto_create_subnetworks = false
+             -> IMPORTANT: this tells GCP "don't automatically make
+                a subnet in every region for me" - we want to control
+                exactly where our one subnet lives (see resource #2).
+                If this were "true", GCP would silently create ~30
+                subnets across every region, which is messy and not
+                what we want for a small learning project.
+    2. google_compute_subnetwork "subnet"
+         - name = var.subnet_name
+         - ip_cidr_range = var.subnet_cidr   (e.g. "10.0.1.0/24" -
+           a private IP address range, like a street of house
+           addresses only this network can use)
+         - region = var.region
+         - network = google_compute_network.vpc.id
+             -> this is what actually PLACES the subnet inside the
+                VPC we made above. Without this link, the subnet
+                would be floating and not attached to any network.
+
+variables.tf
+  The "blanks" this recipe needs filled in by whoever uses it:
+  vpc_name, region, subnet_name, subnet_cidr (subnet_cidr has a
+  default of "10.0.0.0/24" if the caller doesn't specify one).
+
+outputs.tf
+  After this module builds the VPC and subnet, other modules (like
+  firewall and compute) need to know their IDs to attach themselves
+  correctly. outputs.tf is how a module "hands back" information to
+  whoever called it:
+    output "vpc_id"    -> hands back google_compute_network.vpc.id
+    output "subnet_id" -> hands back google_compute_subnetwork.subnet.id
+  Later, environments/dev/main.tf will read these as
+  module.network.vpc_id and module.network.subnet_id.
+
+
+THE KEY CONCEPT WE LEARNED HERE: RESOURCE REFERENCES
+---------------------------------------------------------------------
+Whenever you reference a resource elsewhere in your config, the
+pattern is ALWAYS:
+
+    <resource_type>.<local_name>.<attribute>
+
+For example, given:
+    resource "google_compute_network" "vpc" { ... }
+
+  - resource_type = google_compute_network   (the kind of thing)
+  - local_name    = vpc                      (the nickname YOU gave it,
+                                               from the second quoted
+                                               string)
+  - attribute     = id, name, self_link, etc (a property Terraform
+                                               fills in once created)
+
+So "the ID of this VPC" = google_compute_network.vpc.id
+
+The bug we kept seeing everywhere in this project was code that
+wrote google_compute_network.vpc_id - treating "vpc_id" as if it
+were the local_name, when really the local_name is just "vpc" and
+"id" is a separate attribute on it. Once you can spot this pattern,
+you'll recognize it instantly in other Terraform code too.
+
+
+BUGS WE FOUND AND FIXED HERE
+---------------------------------------------------------------------
+1. variables.tf (all 4 blocks): "variables" -> "variable"
+   HCL block keywords are exact and case-sensitive; "variables"
+   (plural) simply isn't a real block type, so Terraform doesn't
+   even recognize what you're trying to declare.
+2. main.tf line 10: google_compute_network.vpc_id
+                     -> google_compute_network.vpc.id
+3. outputs.tf line 3: google_compute_network.vpc_id
+                       -> google_compute_network.vpc.id
+4. outputs.tf line 8: google_compute_subnetwork.subnet_id
+                       -> google_compute_subnetwork.subnet.id
+
+
+COMMANDS WE RAN FOR THIS FOLDER
+---------------------------------------------------------------------
+cd modules/network
+terraform init       -> downloaded Google provider, success
+terraform validate   -> "Success! The configuration is valid."
+
+Then we deleted the .terraform/ folder and .terraform.lock.hcl that
+init created here - a module doesn't need its own copy of these when
+it's actually used from environments/dev (the root config's init
+handles the whole tree, module included). We only ran init/validate
+here in isolation as a quick standalone syntax/reference check.
+
+We did NOT run terraform plan or apply here - modules can't be
+applied on their own since they have no provider/backend config of
+their own. The real plan/apply happens later in environments/dev,
+which is where this module actually gets used.
+
+
+WHAT'S NEXT
+---------------------------------------------------------------------
+modules/firewall - the recipe for opening specific "gates" (ports)
+in the fence this module just built, so traffic can actually reach
+the VM we'll create in modules/compute.

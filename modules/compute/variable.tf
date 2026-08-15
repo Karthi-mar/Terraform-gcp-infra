@@ -28,7 +28,7 @@ variable "subnet_id" {
 }
 
 variable "network_tags" {
-    description " Network tags - must match the firewall module's target_tags"
+    description = "Network tags - must match the firewall module's target_tags"
     type = list(string)
 }
 

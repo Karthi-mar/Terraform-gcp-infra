@@ -26,3 +26,9 @@ variable "subnet_cidr" {
     type = string
     default = "10.0.1.0/24"
 }
+
+variable "ssh_source_range" {
+    description = "CIDR range allowed to SSH into the web server"
+    type        = list(string)
+}
+

@@ -1,0 +1,192 @@
+=====================================================================
+ ENVIRONMENTS/DEV - explained simply
+=====================================================================
+
+WHAT IS THIS FOLDER FOR?
+---------------------------------------------------------------------
+Every folder before this one (bootstrap, modules/network,
+modules/firewall, modules/compute) was either a one-time setup step
+or a "recipe" that does nothing by itself. environments/dev is the
+ROOT configuration - the one place that actually says "use these
+recipes, with these real values, in this real GCP project" and is
+the thing you actually run terraform apply on to create real
+infrastructure.
+
+If "prod" existed and was fixed the same way, it would be an
+independent copy of this same idea - same modules, different
+variable values (different env name, maybe different sizing) - so
+that changes can be tested in dev before ever touching prod.
+
+
+FILES IN THIS FOLDER
+---------------------------------------------------------------------
+
+main.tf
+  - terraform { required_providers { google = ... } } and
+    provider "google" { project = var.project_id, region = var.region }
+      -> same idea as bootstrap: declares which plugin to use and
+         which GCP project/region to talk to.
+  - module "network" { source = "../../modules/network" ... }
+  - module "firewall" { source = "../../modules/firewall" ... }
+  - module "compute"  { source = "../../modules/compute" ... }
+      -> this is MODULE COMPOSITION: each block says "go run that
+         module's recipe, using these values for its variables".
+         Notice how outputs from one module feed into another as
+         inputs:
+           module.network.vpc_id     -> used as firewall's network_id
+           module.network.subnet_id  -> used as compute's subnet_id
+         This is how Terraform automatically figures out the correct
+         ORDER to create things in: it sees compute depends on
+         network's output, so it creates the VPC/subnet FIRST, then
+         the firewall rules, then the VM last - you never have to
+         manually specify order, Terraform builds a dependency graph
+         from these references.
+
+backend.tf
+  terraform { backend "gcs" { bucket = "...", prefix = "dev" } }
+    -> tells Terraform "don't store state locally, store it in this
+       GCS bucket, under a folder/prefix called 'dev'". This is the
+       bucket bootstrap created. If prod existed with its own
+       backend.tf using prefix = "prod", both environments could
+       safely share the SAME bucket without their state files
+       colliding, since they'd live in different "folders" inside it.
+
+variables.tf
+  project_id (required), region (default "us-central1"),
+  zone (default "us-central1-a"), env (default "dev"),
+  subnet_cidr (default "10.0.1.0/24"), ssh_source_range (required,
+  no default - see below).
+
+terraform.tfvars
+  The real values: your actual project_id, region, zone, env, and
+  ssh_source_range = ["49.47.219.213/32"] (see the SSH section
+  below for why this exists).
+
+outputs.tf
+  output "web_server_ip" { value = module.compute.external_ip }
+    -> after applying, prints the VM's public IP so you don't have
+       to go dig for it in the GCP console.
+
+
+THE KEY CONCEPT WE LEARNED HERE: RESTRICTING SSH WITH A VARIABLE
+---------------------------------------------------------------------
+modules/firewall defaults ssh_source_range to 0.0.0.0/0 (anyone on
+the internet). Rather than hardcoding a fix inside the reusable
+module, we added a NEW variable here in environments/dev
+(ssh_source_range, no default - forces you to consciously set it)
+and passed it into the firewall module call:
+  module "firewall" { ... ssh_source_range = var.ssh_source_range }
+Then set the real value in terraform.tfvars to your own public IPv4
+address with a /32 suffix (meaning "exactly this one address").
+GCP's firewall then drops SSH packets from every other address
+before they even reach the VM - the port is effectively invisible to
+the rest of the internet, while still being open to you.
+
+One subtlety we ran into: you initially gave an IPv6 address, but
+this VM only has a public IPv4 address (access_config{} in the
+compute module only provisions IPv4). Since a connection to an
+IPv4-only destination has to leave your machine over IPv4, the
+address that actually needed whitelisting was your IPv4 address
+(curl -4 ifconfig.me), not the IPv6 one your machine also has.
+
+
+BUGS WE FOUND AND FIXED HERE
+---------------------------------------------------------------------
+1. main.tf line 31: source = "../../module/compute"
+                     -> "../../modules/compute"
+   (missing "s" - wrong folder name, "module not found" error)
+
+2. main.tf line 32: instance_name = "$var.env}-web-server"
+                     -> "${var.env}-web-server"
+   (malformed string interpolation - missing the opening "${" - this
+   wouldn't error, it would just silently produce a wrong, literal
+   instance name)
+
+3. backend.tf: bucket = "Your-actual-project-id-tfstate" (placeholder)
+               -> "gcp-webserver-505607-tfstate" (the real bucket
+                  bootstrap created)
+
+4. terraform.tfvars: project_id/region were still placeholder text
+   with leading spaces baked in (" your actual project id",
+   " us-central1") -> filled with real, space-free values
+
+
+A REAL BUG WE ONLY FOUND BY ACTUALLY RUNNING IT: CRLF LINE ENDINGS
+---------------------------------------------------------------------
+This one wasn't visible just by reading the code - only by applying
+it for real and checking what happened on the actual VM. The first
+apply succeeded (Terraform created everything fine), but visiting
+the site timed out. Checking the VM's boot log
+(gcloud compute instances get-serial-port-output) showed the startup
+script failed INSTANTLY with exit code 127 ("command not found").
+
+Root cause: modules/compute/startup_script.sh had Windows-style
+CRLF line endings (\r\n) instead of Unix LF (\n) - almost certainly
+from being saved/checked-out on Windows. The very first line of any
+shell script (#!/bin/bash) tells Linux exactly which program to run
+the rest of the script with. With a trailing \r baked in, Linux
+looked for a program literally named "/bin/bash\r" - which doesn't
+exist - so it failed before running a single real command.
+
+Fix: in VS Code, click "CRLF" in the bottom status bar -> choose
+"LF" -> save. Then re-run terraform apply so the corrected script
+content gets uploaded to the VM's metadata again.
+
+LESSON: GCP's startup-script metadata reruns on EVERY boot, not just
+the first one. That's why simply re-applying with the fixed file
+was enough - no special "force rerun" step was needed. In this case
+Terraform actually recreated the VM entirely when the script content
+changed (new internal IP, new creation timestamp) rather than doing
+a pure in-place metadata update - either way works, since a fresh
+boot guarantees the corrected script runs from scratch.
+
+TAKEAWAY: "terraform validate" only checks Terraform/HCL syntax. It
+has no idea whether a shell script referenced by file() will actually
+run correctly on Linux. Some bugs only surface once you actually
+apply and test the real thing - which is exactly why we did this
+whole exercise instead of just reading the code.
+
+
+COMMANDS WE RAN FOR THIS FOLDER
+---------------------------------------------------------------------
+cd environments/dev
+terraform init       -> connected to the real GCS backend bucket,
+                         initialized all 3 modules, downloaded provider
+terraform validate   -> "Success! The configuration is valid."
+terraform plan       -> 5 to add: vpc, subnet, 2 firewall rules, vm
+terraform apply      -> typed "yes", created all 5 resources
+                         (first run - VM came up but nginx failed,
+                         see CRLF bug above)
+[fixed startup_script.sh line endings]
+terraform apply      -> typed "yes" again, updated the VM with the
+                         corrected script (Terraform recreated the
+                         instance)
+
+Read-only checks used to verify (safe, don't change anything):
+  gcloud compute instances list --project=gcp-webserver-505607
+  gcloud compute instances describe dev-web-server --zone=us-central1-a \
+      --project=gcp-webserver-505607 --format="value(id,creationTimestamp,status)"
+  gcloud compute instances get-serial-port-output dev-web-server \
+      --zone=us-central1-a --project=gcp-webserver-505607
+  curl http://<external_ip>/     -> confirmed HTTP 200, real nginx
+                                     welcome page returned
+
+
+RESULT
+---------------------------------------------------------------------
+web_server_ip = 34.10.191.158
+Visiting http://34.10.191.158/ shows the real "Welcome to nginx!"
+page. Full stack (VPC, subnet, firewall, VM, nginx) is up, working,
+and entirely within GCP's Always Free tier (single e2-micro, 10 GB
+standard disk, no static IP, no load balancer).
+
+
+WHAT'S NEXT
+---------------------------------------------------------------------
+Now that we've proven it all works, the responsible next step is to
+tear it down with "terraform destroy" so nothing keeps running
+unattended - even though it's free, deliberately cleaning up after a
+test is the right habit (and proves the destroy path works cleanly
+too, which matters just as much as apply working). After that:
+the CI pipeline fixes (.github/workflows/ci.yml) and repo housekeeping
+(.gitignore), which don't touch GCP/billing at all.

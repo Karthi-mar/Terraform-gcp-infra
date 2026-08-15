@@ -1,6 +1,6 @@
 terraform {
     backend "gcs" {
-        bucket = "Your-actual-project-id-tfstate"
+        bucket = "gcp-webserver-505607-tfstate"
         prefix = "dev"
     }
 }

@@ -1,0 +1,129 @@
+=====================================================================
+ MODULES/FIREWALL - explained simply
+=====================================================================
+
+WHAT IS THIS FOLDER FOR?
+---------------------------------------------------------------------
+The network module built a private fenced-off area (VPC) with no
+gates in it - by default, NOTHING can get in or out. A firewall rule
+in GCP is literally a "gate" you cut into that fence, saying exactly
+what kind of traffic (which port, from which addresses) is allowed
+through.
+
+This module's recipe creates two gates:
+  1. Port 22 (SSH) - so YOU can remotely log into the VM to manage it
+  2. Port 80 (HTTP) - so the public can reach the website nginx will
+     serve from the VM
+
+Without these rules, even though the VM has a public IP, nobody
+(including you) could actually connect to it - GCP blocks everything
+by default and you have to explicitly allow what you want.
+
+
+FILES IN THIS FOLDER
+---------------------------------------------------------------------
+
+main.tf
+  Declares two google_compute_firewall resources:
+    1. "allow_ssh"
+         - allow { protocol = "tcp", ports = ["22"] }
+         - source_ranges = var.ssh_source_range
+             -> WHO is allowed in (a list of IP ranges)
+         - target_tags = var.target_tags
+             -> WHICH instances this rule applies to. GCP firewall
+                rules don't attach directly to a VM - they attach to
+                a "network tag" (a text label), and any VM that has
+                that same tag gets the rule applied to it. This is
+                how modules/compute and modules/firewall stay linked:
+                both get told the same tag ("web-server") from
+                environments/dev.
+    2. "allow_http"
+         - same idea, port 80, but source_ranges is hardcoded to
+           ["0.0.0.0/0"] directly in this file (not a variable) since
+           a public website SHOULD be open to everyone by definition.
+
+variables.tf
+  firewall_prefix  - text prefix so rule names look like
+                      "dev-allow-ssh", "dev-allow-http" etc.
+  network_id       - which VPC to attach these rules to (comes from
+                      the network module's output)
+  target_tags      - the tag(s) these rules apply to (list of strings)
+  ssh_source_range - which IPs can SSH in. Defaults to 0.0.0.0/0
+                      (literally "any IP on the internet") unless
+                      overridden by whoever calls this module.
+
+outputs.tf
+  Hands back the actual names of the two firewall rules that got
+  created, in case something else needs to reference them later.
+
+
+THE KEY CONCEPT WE LEARNED HERE: TAGS LINK FIREWALL RULES TO VMs
+---------------------------------------------------------------------
+Firewall rules don't say "apply to VM named X". They say "apply to
+any resource carrying tag Y". Then separately, a VM resource has a
+"tags = [...]" list. If the tag strings match, the rule applies.
+This means the SAME tag string ("web-server") has to be passed to
+BOTH modules/firewall (as target_tags) AND modules/compute (as
+network_tags) from environments/dev - they're two independent places
+that both need to agree on the same magic string. If they ever drift
+apart (e.g. someone renames one but not the other), the firewall
+rule silently stops applying to the VM - no error, it just won't work,
+which is a sneaky kind of bug to debug later. Worth remembering.
+
+
+BUGS WE FOUND AND FIXED HERE
+---------------------------------------------------------------------
+1. main.tf line 11: target_tags var.target_tags
+                     -> target_tags = var.target_tags
+   (missing "=" - every attribute assignment needs one)
+
+2. main.tf line 14: resource "google_compute_firewall" " allow_http"
+                     -> resource "google_compute_firewall" "allow_http"
+   (leading space inside the quotes made the real resource name
+   literally " allow_http", which didn't match what outputs.tf was
+   trying to reference)
+
+3. main.tf line 23: source_range = ["0.0.0.0/0"]
+                     -> source_ranges = ["0.0.0.0/0"]
+   (wrong argument name - GCP's firewall resource requires the
+   PLURAL "source_ranges", even for a single range)
+
+4. Cosmetic cleanup (optional, but you did it): renamed the "shh"
+   typo to "ssh" consistently - in the resource name string, the
+   variable name (shh_source_range -> ssh_source_range), and the
+   output name/description (firwall -> firewall). This required
+   updating EVERY place that referenced the old name
+   (var.shh_source_range in main.tf) to match the new one - a good
+   lesson in why renaming things in Terraform means grep-ing for
+   every usage, not just the declaration.
+
+
+SECURITY NOTE (not a bug, a judgment call for later)
+---------------------------------------------------------------------
+ssh_source_range still defaults to ["0.0.0.0/0"] - anyone on the
+internet can attempt to SSH to port 22 of the VM (they'd still need
+valid credentials/keys to actually get in, but exposing the port at
+all is unnecessary risk). In Step 5 (environments/dev), we'll
+override this with just YOUR public IP instead of leaving it open to
+the whole internet.
+
+
+COMMANDS WE RAN FOR THIS FOLDER
+---------------------------------------------------------------------
+cd modules/firewall
+terraform init       -> downloaded Google provider, success
+terraform validate   -> "Success! The configuration is valid."
+
+Then deleted the .terraform/ and .terraform.lock.hcl this created,
+same reasoning as the network module - not needed once this is used
+for real from environments/dev.
+
+No plan/apply here either - same reason as network: modules have no
+provider/backend of their own, so they can't be applied standalone.
+
+
+WHAT'S NEXT
+---------------------------------------------------------------------
+modules/compute - the recipe for the actual VM (virtual machine) that
+will sit inside the subnet, carry the "web-server" tag so these
+firewall rules apply to it, and run nginx via a startup script.

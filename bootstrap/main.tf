@@ -1,7 +1,7 @@
 terraform {
     required_providers {
         google = {
-            source = "hashcorp/google"
+            source = "hashicorp/google"
             version = "~>5.0"
         }
     }
@@ -13,15 +13,15 @@ provider "google" {
     region = var.region
 }
 
-resource "google_storage_busckt" "tf_state" {
-    name = var.bucket_anme
+resource "google_storage_bucket" "tf_state" {
+    name = var.bucket_name
     location = var.region
     storage_class = "STANDARD"
-    uniform_bucket_access = true
+    uniform_bucket_level_access = true
     public_access_prevention = "enforced"
 
     versioning {
     enabled = true
-}
+    }
 }
 

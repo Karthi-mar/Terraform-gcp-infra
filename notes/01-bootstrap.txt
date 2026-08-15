@@ -1,0 +1,171 @@
+=====================================================================
+ BOOTSTRAP FOLDER - explained simply
+=====================================================================
+
+WHAT IS THIS FOLDER FOR?
+---------------------------------------------------------------------
+Imagine Terraform is a robot that builds your GCP infrastructure for
+you. Every time it builds something, it needs to write down "what did
+I build?" in a notebook (this is called STATE). If it loses that
+notebook, it forgets what it built and can get very confused.
+
+The "bootstrap" folder's ONLY job is to create a safe home for that
+notebook: a GCS (Google Cloud Storage) bucket. Nothing else. This is
+a one-time setup step you run before anything else in the project.
+
+Why not just let Terraform keep the notebook on your laptop?
+Because if your laptop dies, or you work from a different computer,
+or you want a teammate to help, a notebook stored only on your local
+disk is lost/inaccessible. Storing it in a GCS bucket means anyone
+with access to the project can pick up where you left off.
+
+THIS RUNS ONCE. You don't re-run bootstrap every day. You run it
+once, get your bucket, and then every other environment (dev, prod)
+points at that same bucket to store ITS notebook.
+
+
+FILES IN THIS FOLDER
+---------------------------------------------------------------------
+
+main.tf
+  This is the actual instructions for the robot. It says:
+    1. "Use the official Google Cloud plugin (hashicorp/google)"
+       so Terraform knows HOW to talk to GCP at all.
+    2. "Here's my GCP project and region" (provider block) - this is
+       like telling the robot which house/city it's allowed to build
+       things in.
+    3. "Create one storage bucket" (resource "google_storage_bucket")
+       with these settings:
+         - storage_class = "STANDARD"   -> normal, cheapest storage
+         - uniform_bucket_level_access = true
+             -> only IAM permissions control access (modern, simpler,
+                recommended way - no old-style per-file permissions)
+         - public_access_prevention = "enforced"
+             -> guarantees nobody on the public internet can ever
+                read this bucket, even by accident
+         - versioning { enabled = true }
+             -> keeps old copies of the state file if it changes, so
+                you can recover if something gets corrupted
+
+variables.tf
+  This is a list of "blanks" that main.tf needs filled in before it
+  can run: project_id, region, bucket_name. Declaring them here just
+  says "these exist and must be provided" - it doesn't give them
+  values yet (kind of like a form with empty fields and a label next
+  to each field saying what type of answer is expected, e.g. "type
+  = string").
+
+terraform.tfvars
+  This is where you actually FILL IN the blanks from variables.tf
+  with real values, specific to YOUR project:
+    project_id  = "gcp-webserver-505607"
+    bucket_name = "gcp-webserver-505607-tfstate"
+    region      = "us-central1"
+  Terraform automatically reads this file and uses it to fill the
+  variables - you never have to type these values on the command
+  line.
+
+.terraform.lock.hcl (appears automatically after "terraform init")
+  Terraform downloads a "plugin" (the Google provider) that knows how
+  to actually talk to GCP's API. This lock file just records the
+  EXACT version it downloaded, so if you (or a teammate) run init
+  again later, you get the identical version and nothing breaks
+  unexpectedly. You don't edit this file by hand.
+
+
+BUGS WE FOUND AND FIXED HERE
+---------------------------------------------------------------------
+1. main.tf line 4:  "hashcorp/google"  ->  "hashicorp/google"
+   (typo in the plugin name - Terraform couldn't find the plugin)
+2. main.tf line 16: "google_storage_busckt" -> "google_storage_bucket"
+   (typo in the resource type - not a real GCP thing)
+3. main.tf line 17: var.bucket_anme -> var.bucket_name
+   (typo - referenced a blank that was never declared)
+4. main.tf line 20: uniform_bucket_access -> uniform_bucket_level_access
+   (typo in the setting name)
+5. terraform.tfvars: filled in real project_id / bucket_name, and
+   fixed "us-cental1" -> "us-central1" (typo, and was also missing
+   entirely at first - Terraform requires every declared variable
+   to have a value from somewhere)
+
+
+TERRAFORM COMMANDS - CHEAT SHEET (what each one actually does)
+---------------------------------------------------------------------
+terraform init
+  "Get ready to work." Downloads the Google Cloud plugin, sets up the
+  local working folder (.terraform/). Safe to run anytime, doesn't
+  touch your real GCP resources. Run this first, and again anytime
+  you change providers/backend/modules.
+
+terraform validate
+  "Did I write valid Terraform?" Just checks your .tf files for
+  syntax errors (missing "=", wrong keywords, etc). Does NOT talk to
+  GCP at all. 100% safe, free, instant.
+
+terraform plan
+  "If I ran this right now, what would change?" Talks to the real GCP
+  API to see what currently exists, compares it to your .tf files,
+  and shows you a preview (+ create, ~ change, - destroy). Does NOT
+  change anything. Always read the plan before applying - it's your
+  safety check.
+
+terraform apply
+  "Actually go do it." Shows you the plan one more time, asks you to
+  type "yes" to confirm, then actually creates/changes/destroys real
+  resources in GCP. This is the only command that costs anything or
+  makes real changes.
+
+terraform destroy
+  "Undo everything this config created." Deletes every resource
+  Terraform is tracking in its state/notebook for this folder. Useful
+  for cleaning up so you don't get charged for anything left running.
+
+terraform show
+  Prints out what's currently in the state file (the notebook) in a
+  readable way - good for double-checking what Terraform thinks
+  exists.
+
+terraform state list
+  Lists just the names of everything being tracked in the state file,
+  e.g. "google_storage_bucket.tf_state".
+
+
+EXACT COMMANDS WE RAN FOR THIS FOLDER
+---------------------------------------------------------------------
+cd bootstrap
+terraform init          -> downloaded the Google plugin, success
+terraform validate      -> "Success! The configuration is valid."
+terraform plan          -> showed: 1 to add, 0 to change, 0 to destroy
+                            (one google_storage_bucket named
+                            gcp-webserver-505607-tfstate)
+terraform apply         -> typed "yes" to actually create the bucket
+
+Note: bootstrap has NO backend.tf, so its own state/notebook is saved
+as a plain local file (terraform.tfstate) right inside this bootstrap
+folder - not in a GCS bucket. That's expected and normal: this is the
+one folder whose whole JOB is to create the bucket that OTHER folders
+(dev, prod) will use, so it can't depend on that bucket existing yet
+(chicken-and-egg problem).
+
+
+HOW TO CHECK IT WORKED
+---------------------------------------------------------------------
+Any of these confirm the bucket was really created on GCP's side:
+
+  gcloud storage buckets describe gs://gcp-webserver-505607-tfstate
+
+  gcloud storage ls --project=gcp-webserver-505607
+
+  terraform state list        (run inside the bootstrap folder)
+
+
+WHAT'S NEXT
+---------------------------------------------------------------------
+This bucket now exists and is just sitting there empty, waiting.
+In Step 5 (environments/dev), we'll point dev's backend.tf at this
+exact bucket name, and from then on, every "terraform apply" you run
+inside environments/dev will save ITS notebook (state file) into this
+bucket automatically, under the "dev" prefix/folder.
+
+We do NOT destroy this bucket when we're done testing dev - it needs
+to keep existing permanently as the shared home for state files.

@@ -3,31 +3,31 @@ name: terraform CI
 on:
     push:
         branches: [main]
-        path: ["**.tf"]
+        paths: ["**.tf"]
     pull_request:
         branches: [main]
-        path: ["**.tf"]
+        paths: ["**.tf"]
 
 jobs:
     fmt:
-        run-on: ubuntu-latest
+        runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v4
             - uses: hashicorp/setup-terraform@v3
             - run: terraform fmt -check -recursive 
         
     validate:
-        run-on: ubuntu-latest
+        runs-on: ubuntu-latest
         needs: fmt
         strategy:
             matrix:
-                environment: [dev,prod]
+                environment: [dev]   #add prod later to the list
         steps:
             - uses: actions/checkout@v4
             - uses: hashicorp/setup-terraform@v3
             - name: Init without the backend
-            - run: terrafrom init -backend=false
+              run: terraform init -backend=false
               working-directory: environments/${{matrix.environment }}
             - name: validate
-            - run: terraform validate
+              run: terraform validate
               working-directory: environments/${{matrix.environment }}

@@ -17,5 +17,5 @@ resource "google_compute_instance" "vm"{
         access_config {}  # gives the vm an ephimeral public ip , leaving it out will make it only internal
     }
 
-    metadata_Startup_script = file("${path.module}/startup-script.sh")  # reads a shell script and runs on the first boot
+    metadata_startup_script = file("${path.module}/startup_script.sh")  # reads a shell script and runs on the first boot
 }
