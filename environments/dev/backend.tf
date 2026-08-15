@@ -1,8 +1,8 @@
 terraform {
-    backend "gcs" {
-        bucket = "gcp-webserver-505607-tfstate"
-        prefix = "dev"
-    }
+  backend "gcs" {
+    bucket = "gcp-webserver-505607-tfstate"
+    prefix = "dev"
+  }
 }
 
 
